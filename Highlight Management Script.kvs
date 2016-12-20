@@ -1,10 +1,10 @@
 # Highlight Management Script
 # ===========================
 
-# Version 1.3 March 2014
+# Version 1.4 October 2016
 
 /*
-Copyright (C) 2011-2014 OmegaPhil (OmegaPhil+KVIrc@gmail.com)
+Copyright (C) 2011-2016 OmegaPhil (OmegaPhil@startmail.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -36,17 +36,14 @@ event(OnHighlight,HighlightManagementScript)
     # Exiting if script is turned off
     if (%HighlightManagementScript_Settings{"Status"} == "Off") return
     
-    # Setting nick
+    # Setting variables
     %nick = $0
-
-    # Setting channel
+    %username = $1
     %channel = $target
-    
-    # Setting message
     %message = $3
     
-    # Checking if the channel and/or nick is blacklisted
-    if ($HighlightManagementScript::IsHighlight(%nick, %channel) == $false)
+    # Checking if the channel, username and/or nick is blacklisted
+    if ($HighlightManagementScript::IsHighlight(%nick, %username, %channel) == $false)
     {
         # The highlight is blacklisted - echoing the message in the channel without triggerring highlighting (KVIrc is able to substitute the user and host fields itself)
         echoprivmsg --no-highlighting %nick * * %message
@@ -56,7 +53,38 @@ event(OnHighlight,HighlightManagementScript)
     }
     else
     {
-        # No need to take action with successful highlights yet
+        # Logging the highlight
+        # Stripping colours - neither the highlight log window nor the log file can cope with these
+        %message = $str.stripcolors(%message)
+        
+        # Generating logline
+        %timestamp_format = %HighlightManagementScript_Settings{"HighlightLogTimestampFormat"}
+        %normal_highlight_format = %HighlightManagementScript_Settings{"HighlightLogNormalHighlightFormat"}
+        %pm_highlight_format = %HighlightManagementScript_Settings{"HighlightLogPMHighlightFormat"}
+        %log_to_file = %HighlightManagementScript_Settings{"HighlightLogLogToFile"}
+        %timestamp = $date(%timestamp_format)
+
+        # Detecting channel VS PM highlights
+        # All substitution variables are available for the loglines, even when it doesn't make sense - must be case-sensitive replace to work properly
+        if ($query($target) == 0)
+        {
+            %highlight_details = $str.replace(%normal_highlight_format, "\%t", %timestamp, $true)
+        }
+        else
+        {
+            %highlight_details = $str.replace(%pm_highlight_format, "\%t", %timestamp, $true)
+        }
+        %highlight_details = $str.replace(%highlight_details, "\%N", $context.networkName, $true)
+        %highlight_details = $str.replace(%highlight_details, "\%c", %channel, $true)
+        %highlight_details = $str.replace(%highlight_details, "\%n", %nick, $true)
+        %highlight_details = $str.replace(%highlight_details, "\%m", %message, $true)
+
+        # Logging to Highlight Log window
+        %log_window = %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_HighlightLog"}
+        %log_window->%log_widget->$append(%highlight_details)
+
+        # Logging to file if desired, in the user-configured KVIrc logs directory
+        if (%log_to_file == $true) file.write --append "$option("stringLogsPath")/Highlight Log - $date("y-m-d").txt" "%highlight_details\n"
     }
 }
 
@@ -74,7 +102,7 @@ event(OnKVIrcStartup,HighlightManagementScript)
 alias(HighlightManagementScript)
 {
     # Variable allocation
-    %usageInstructions = "Usage: HighlightManagementScript <command>. <nothing>: Echos the status of the script. on: Turns script on. off: Turns script off. listnicks: Echoes all currently blacklisted nicks. addnick <network> <nick> [<notes>]: Adds the requested nick to the nick blacklist with notes if specified. deletenick <network> <nick>: Deletes the requested nick from the nick blacklist. listchans: Lists blacklisted chans. addchan <network name> <chan> [<notes>]: Adds the requested channel to the channel blacklist with notes if specified. deletechan <network name> <chan>: Deletes the requested channel from the channel blacklist. h/help: Echos usage instructions."
+    %usage_instructions = "Usage: HighlightManagementScript <command>. <nothing>: Echos the status of the script. on: Turns script on. off: Turns script off. listnicks: Echoes all currently blacklisted nicks. addnick <network> <nick> [<notes>]: Adds the requested nick to the nick blacklist with notes if specified. deletenick <network> <nick>: Deletes the requested nick from the nick blacklist. listchans: Lists blacklisted chans. addchan <network name> <chan> [<notes>]: Adds the requested channel to the channel blacklist with notes if specified. deletechan <network name> <chan>: Deletes the requested channel from the channel blacklist. h/help: Echos usage instructions."
     
     # Intercepting status request (nothing passed to the alias)
     if ($0 == "")
@@ -86,7 +114,7 @@ alias(HighlightManagementScript)
     # Intercepting help requests
     if ($0 == "h" || $0 == "help")
     {
-        echo %usageInstructions
+        echo %usage_instructions
         return
     }
     
@@ -135,7 +163,11 @@ alias(HighlightManagementScript)
         echo "Listing blacklisted nicks..."
         
         # Checking if there are no blacklisted nicks
-        if ($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"})[]# == 0)
+        foreach(%network,$keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
+        {
+            if ($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"})[]# != 0) %networks_with_blacklists{%network} = %network
+        }
+        if (%networks_with_blacklists == "")
         {
             # There aren't - informing user and exiting
             echo "No nicks are currently blacklisted."
@@ -143,17 +175,17 @@ alias(HighlightManagementScript)
         }
 
         # Looping for all networks that contain blacklisted nicks
-        %sortedNetworks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
-        foreach(%network,%sortedNetworks)
+        %sorted_networks = $sort($keys(%networks_with_blacklists))
+        foreach(%network,%sorted_networks)
         {
             echo "\nOn "%network":"
             
             # Looping for all blacklisted nicks in network
-            %sortedNicks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}))
-            foreach(%nick,%sortedNicks)
+            %sorted_nicks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}))
+            foreach(%nick,%sorted_nicks)
             {
                 # Obtaining potential notes
-                %notes = %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%nick}
+                %notes = %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}{%nick}
                 
                 # Echoing nick (with notes if they exist)
                 if (%notes != %nick)
@@ -202,8 +234,8 @@ alias(HighlightManagementScript)
             return 2
         }
         
-        # Setting blacklistNick
-        %blacklistNick = $2
+        # Setting blacklist_nick
+        %blacklist_nick = $2
         
         # Setting notes
         if ($3- != "")
@@ -213,33 +245,33 @@ alias(HighlightManagementScript)
         else
         {
             # Padding with nick - KVIrc doesn't allow empty hash items
-            %notes = %blacklistNick
+            %notes = %blacklist_nick
         }
         
         # Making sure nick isn't already blacklisted on the given network
-        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%blacklistNick} != "")
+        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}{%blacklist_nick} != "")
         {
             # Nick is already blacklisted, informing user and exiting
-            warning %blacklistNick" is already blacklisted on "%network"."
+            warning %blacklist_nick" is already blacklisted on "%network"."
             return 3
         }
         
-        # Adding blacklistNick on network with notes and saving
-        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%blacklistNick} = %notes
+        # Adding blacklist_nick on network with notes and saving
+        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}{%blacklist_nick} = %notes
         HighlightManagementScript::Save
         
         # Informational message
-        if (%notes != %blacklistNick)
+        if (%notes != %blacklist_nick)
         {
-            echo %blacklistNick" ("%notes") has been added to the nick blacklist on "%network"."
+            echo %blacklist_nick" ("%notes") has been added to the nick blacklist on "%network"."
         }
         else
         {
-            echo %blacklistNick" has been added to the nick blacklist on "%network"."
+            echo %blacklist_nick" has been added to the nick blacklist on "%network"."
         }
         return 0
     }
-    
+
     # Intercepting deletenick command
     # Return codes:
     # 0: Success
@@ -268,26 +300,190 @@ alias(HighlightManagementScript)
             return 2
         }
         
-        # Setting blacklistNick
-        %blacklistNick = $2
+        # Setting blacklist_nick
+        %blacklist_nick = $2
         
         # Making sure nick is blacklisted on the given network
-        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%blacklistNick} == "")
+        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}{%blacklist_nick} == "")
         {
             # Nick has not been blacklisted on the given network, informing user and exiting
-            warning %blacklistNick" has not been blacklisted on "%network"."
+            warning %blacklist_nick" has not been blacklisted on "%network"."
             return 3
         }
         
-        # Deleting blacklistNick on network and saving
-        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%blacklistNick} = ""
+        # Deleting blacklist_nick on network and saving
+        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}{%blacklist_nick} = ""
         HighlightManagementScript::Save
         
         # Informational message
-        echo %blacklistNick" has been deleted from the nick blacklist on "%network"."
+        echo %blacklist_nick" has been deleted from the nick blacklist on "%network"."
         return 0
     }
-    
+
+    # Intercepting listusernames command
+    if ($0 == "listusernames")
+    {
+        # Informational message
+        echo "Listing blacklisted usernames..."
+
+        # Checking if there are no blacklisted usernames
+        foreach(%network,$keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
+        {
+            if ($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"})[]# != 0) %networks_with_blacklists{%network} = %network
+        }
+        if (%networks_with_blacklists == "")
+        {
+            # There aren't - informing user and exiting
+            echo "No usernames are currently blacklisted."
+            return
+        }
+
+        # Looping for all networks that contain blacklisted usernames
+        %sorted_networks = $sort($keys(%networks_with_blacklists))
+        foreach(%network,%sorted_networks)
+        {
+            echo "\nOn "%network":"
+
+            # Looping for all blacklisted usernames in network
+            %sorted_usernames = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}))
+            foreach(%username,%sorted_usernames)
+            {
+                # Obtaining potential notes
+                %notes = %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}{%username}
+
+                # Echoing username (with notes if they exist)
+                if (%notes != %username)
+                {
+                    # Notes present
+                    echo %username" - Notes: "%notes
+                }
+                else
+                {
+                    # Notes not present
+                    echo %username
+                }
+            }
+        }
+
+        # Informational message
+        echo "\nBlacklisted usernames listed."
+        return
+    }
+
+    # Intercepting addusername command
+    # Return codes:
+    # 0: Success
+    # 1: Network wasn't specified
+    # 2: Username wasn't specified
+    # 3: Username already blacklisted on network
+    if ($0 == "addusername")
+    {
+        # Verifying parameters
+        # Making sure a network was specified
+        if ($1 == "")
+        {
+            # No network was specified - informing user and exiting
+            warning "Please specify a network when adding to the username blacklist."
+            return 1
+        }
+
+        # Setting network
+        %network = $1
+
+        # Making sure a username was specified
+        if ($2 == "")
+        {
+            # No username was specified - informing user and exiting
+            warning "Please specify a username to add to the username blacklist. Parameters: '"$0-"'"
+            return 2
+        }
+
+        # Setting blacklist_username
+        %blacklist_username = $2
+
+        # Setting notes
+        if ($3- != "")
+        {
+            %notes = $3-
+        }
+        else
+        {
+            # Padding with username - KVIrc doesn't allow empty hash items
+            %notes = %blacklist_username
+        }
+
+        # Making sure username isn't already blacklisted on the given network
+        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}{%blacklist_username} != "")
+        {
+            # Username is already blacklisted, informing user and exiting
+            warning %blacklist_username" is already blacklisted on "%network"."
+            return 3
+        }
+
+        # Adding blacklist_username on network with notes and saving
+        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}{%blacklist_username} = %notes
+        HighlightManagementScript::Save
+
+        # Informational message
+        if (%notes != %blacklist_username)
+        {
+            echo %blacklist_username" ("%notes") has been added to the username blacklist on "%network"."
+        }
+        else
+        {
+            echo %blacklist_username" has been added to the username blacklist on "%network"."
+        }
+        return 0
+    }
+
+    # Intercepting deleteusername command
+    # Return codes:
+    # 0: Success
+    # 1: Network wasn't specified
+    # 2: Username wasn't specified
+    # 3: Username isn't blacklisted on network
+    if ($0 == "deleteusername")
+    {
+        # Verifying parameters
+        # Making sure a network was specified
+        if ($1 == "")
+        {
+            # No network was specified - informing user and exiting
+            warning "Please specify a network when deleting from the username blacklist."
+            return 1
+        }
+
+        # Setting network
+        %network = $1
+
+        # Making sure a username was specified
+        if ($2 == "")
+        {
+            # No username was specified - informing user and exiting
+            warning "Please specify a username to delete from the username blacklist. Parameters: '"$0-"'"
+            return 2
+        }
+
+        # Setting blacklist_username
+        %blacklist_username = $2
+
+        # Making sure username is blacklisted on the given network
+        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}{%blacklist_username} == "")
+        {
+            # Username has not been blacklisted on the given network, informing user and exiting
+            warning %blacklist_username" has not been blacklisted on "%network"."
+            return 3
+        }
+
+        # Deleting blacklist_username on network and saving
+        %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}{%blacklist_username} = ""
+        HighlightManagementScript::Save
+
+        # Informational message
+        echo %blacklist_username" has been deleted from the username blacklist on "%network"."
+        return 0
+    }
+
     # Intercepting listchans command
     if ($0 == "listchans")
     {
@@ -303,14 +499,14 @@ alias(HighlightManagementScript)
         }
         
         # Looping for all networks that contain blacklisted channels
-        %sortedNetworks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}))
-        foreach(%network,%sortedNetworks)
+        %sorted_networks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}))
+        foreach(%network,%sorted_networks)
         {
             echo "\nOn "%network":"
             
             # Looping for all blacklisted channels in network
-            %sortedChannels = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}))
-            foreach(%channel,%sortedChannels)
+            %sorted_channels = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}))
+            foreach(%channel,%sorted_channels)
             {
                 # Obtaining potential notes
                 %notes = %HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%channel}
@@ -362,8 +558,8 @@ alias(HighlightManagementScript)
             return 2
         }
         
-        # Setting blacklistChannel
-        %blacklistChannel = $2
+        # Setting blacklist_channel
+        %blacklist_channel = $2
         
         # Setting notes
         if ($3- != "")
@@ -373,29 +569,29 @@ alias(HighlightManagementScript)
         else
         {
             # Padding with channel - KVIrc doesn't allow empty hash items
-            %notes = %blacklistChannel
+            %notes = %blacklist_channel
         }
         
         # Making sure channel isn't already blacklisted on the given network
-        if (%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklistChannel} != "")
+        if (%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklist_channel} != "")
         {
             # Channel is already blacklisted, informing user and exiting
-            warning %blacklistChannel" is already blacklisted on "%network"."
+            warning %blacklist_channel" is already blacklisted on "%network"."
             return 3
         }
         
-        # Adding blacklistChannel on network with notes and saving
-        %HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklistChannel} = %notes
+        # Adding blacklist_channel on network with notes and saving
+        %HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklist_channel} = %notes
         HighlightManagementScript::Save
         
         # Informational message
-        if (%notes != %blacklistChannel)
+        if (%notes != %blacklist_channel)
         {
-            echo %blacklistChannel" ("%notes") has been added to the channel blacklist on "%network"."
+            echo %blacklist_channel" ("%notes") has been added to the channel blacklist on "%network"."
         }
         else
         {
-            echo %blacklistChannel" has been added to the channel blacklist on "%network"."
+            echo %blacklist_channel" has been added to the channel blacklist on "%network"."
         }
         return 0
     }
@@ -428,23 +624,23 @@ alias(HighlightManagementScript)
             return 2
         }
         
-        # Setting blacklistChannel
-        %blacklistChannel = $2
+        # Setting blacklist_channel
+        %blacklist_channel = $2
         
         # Making sure channel is blacklisted on the given network
-        if (%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklistChannel} == "")
+        if (%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklist_channel} == "")
         {
             # Channel has not been blacklisted on the given network, informing user and exiting
-            warning %blacklistChannel" has not been blacklisted on "%network"."
+            warning %blacklist_channel" has not been blacklisted on "%network"."
             return 3
         }
         
-        # Deleting blacklistChannel on network and saving
-        %HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklistChannel} = ""
+        # Deleting blacklist_channel on network and saving
+        %HighlightManagementScript_Settings{"BlacklistedChans"}{%network}{%blacklist_channel} = ""
         HighlightManagementScript::Save
         
         # Informational message
-        echo %blacklistChannel" has been deleted from the channel blacklist on "%network"."
+        echo %blacklist_channel" has been deleted from the channel blacklist on "%network"."
         return 0
     }
     
@@ -453,24 +649,30 @@ alias(HighlightManagementScript)
 }
 
 # HighlightManagementScript::IsHighlight alias
-# Usage: HighlightManagementScript::IsHighlight <nick> <channel>
+# Usage: HighlightManagementScript::IsHighlight <nick> <username> <channel>
 # Returns $true/$false based on whether the highlight is valid or not
 alias(HighlightManagementScript::IsHighlight)
 {
     # Making sure nick is passed
     if ($0 == "") error "HighlightManagementScript::IsHighlight was called without passing a nick."
-    
+
     # Setting nick
     %nick = $0
+
+    # Making sure username is passed
+    if ($1 == "") error "HighlightManagementScript::IsHighlight was called without passing a username. Parameters: '"$0-"'."
+
+    # Setting username
+    %username = $1
     
     # Making sure channel is passed
-    if ($1 == "") error "HighlightManagementScript::IsHighlight was called without passing a channel. Parameters: '"$0-"'."
+    if ($2 == "") error "HighlightManagementScript::IsHighlight was called without passing a channel. Parameters: '"$0-"'."
 
     # Setting channel
-    %channel = $1
+    %channel = $2
 
     # Returning whether highlight was valid or not (channel and/or nick is blacklisted or not)
-    if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{$context.networkName}{%nick} != "" || %HighlightManagementScript_Settings{"BlacklistedChans"}{$context.networkName}{%channel} != "")
+    if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{$context.networkName}{"Nicks"}{%nick} != "" || %HighlightManagementScript_Settings{"BlacklistedNicks"}{$context.networkName}{"Usernames"}{%username} != "" || %HighlightManagementScript_Settings{"BlacklistedChans"}{$context.networkName}{%channel} != "")
     {
         return $false
     }
@@ -484,14 +686,14 @@ alias(HighlightManagementScript::IsHighlight)
 alias(HighlightManagementScript::Save)
 {
     # Opening config file
-    %configFileID = $config.open($file.localdir("/scripts/highlight_management_script_settings"))
+    %config_file_id = $config.open($file.localdir("/scripts/highlight_management_script_settings"))
     
     # Saving settings
-    config.clearsection %configFileID "KVIrc"
-    config.write %configFileID "HighlightManagementScript_Settings" $serialize(%HighlightManagementScript_Settings)
+    config.clearsection %config_file_id "KVIrc"
+    config.write %config_file_id "HighlightManagementScript_Settings" $serialize(%HighlightManagementScript_Settings)
 
     # Committing settings
-    config.close %configFileID
+    config.close %config_file_id
 }
 
 # HighlightManagementScript::Startup alias
@@ -504,17 +706,35 @@ alias(HighlightManagementScript::Startup)
     if ($file.exists($file.localdir("/scripts/highlight_management_script_settings")) == $true)
     {
         # Opening config file
-        %configFileID = $config.open($file.localdir("/scripts/highlight_management_script_settings"))
+        %config_file_id = $config.open($file.localdir("/scripts/highlight_management_script_settings"))
         
         # Loading settings
-        %HighlightManagementScript_Settings = $unserialize($config.read(%configFileID, "HighlightManagementScript_Settings"))
+        %HighlightManagementScript_Settings = $unserialize($config.read(%config_file_id, "HighlightManagementScript_Settings"))
         
         # Closing configuration file
-        config.close %configFileID
+        config.close %config_file_id
     }
 
     # Initialising settings if needed
     if (%HighlightManagementScript_Settings{"Status"} == "") %HighlightManagementScript_Settings{"Status"} = "On"
+
+    # If these Highlight Log defaults are changed, remember to update the HighlightFormatHelp label on the configuration dialog
+    if (%HighlightManagementScript_Settings{"HighlightLogTimestampFormat"} == "") %HighlightManagementScript_Settings{"HighlightLogTimestampFormat"} = "d/m/y H:M:S"
+    if (%HighlightManagementScript_Settings{"HighlightLogNormalHighlightFormat"} == "") %HighlightManagementScript_Settings{"HighlightLogNormalHighlightFormat"} = "[\%t] On \%N, message on \%c from \%n: \%m"
+    if (%HighlightManagementScript_Settings{"HighlightLogPMHighlightFormat"} == "") %HighlightManagementScript_Settings{"HighlightLogPMHighlightFormat"} = "[\%t] On \%N, PM from \%n: \%m"
+    if (%HighlightManagementScript_Settings{"HighlightLogLogToFile"} == "") %HighlightManagementScript_Settings{"HighlightLogLogToFile"} = $true
+
+    # Upgrading blacklisted nicks storage if necessary - prior to v1.4, you could only blacklist a nick and this was stored in {"BlacklistedNicks"}{<network>}{<nick>}, now this has been extended to allow for usernames and in future other things
+    foreach(%network, $keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
+    {
+        if (%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"} == "" || $typeof(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}) != "hash")
+        {
+            %tmp_hash = ""
+            foreach(%nick, $keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network})) %tmp_hash{%nick} = %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{%nick}
+            %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network} = ""
+            %HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"} = %tmp_hash
+        }
+    }
 
     # Creating dialogs
     # Add Nick To Blacklist dialog
@@ -528,7 +748,7 @@ alias(HighlightManagementScript::Startup)
     
     %label_network = $new(label,%vbox)
     %label_network->$setText("Network:")
-    
+
     %lineedit_network = $new(lineedit,%vbox,"Network")
     %dialog->%lineedit_network = %lineedit_network
     
@@ -628,12 +848,12 @@ alias(HighlightManagementScript::Startup)
     %layout = $new(layout,%dialog)
     %layout->$addRowSpacing(0,30)
     %layout->$addWidget(%vbox,0,0)
-    
+
     %label_network = $new(label,%vbox)
     %label_network->$setText("Network:")
     %listbox_network = $new(listbox,%vbox,"Network")
     %dialog->%listbox_network = %listbox_network
-    
+
     %label_nick = $new(label,%vbox)
     %label_nick->$setText("Nick:")
     %listbox_nick = $new(listbox,%vbox,"Nick")
@@ -653,8 +873,12 @@ alias(HighlightManagementScript::Startup)
     {
         # Populating listbox_network 
         $$->%listbox_network->$clear
-        %sortedNetworks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
-        foreach(%network,%sortedNetworks) $$->%listbox_network->$insertitem(%network)
+        %sorted_networks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
+        foreach(%network,%sorted_networks)
+        {
+            # Only add the network when there are blacklisted nicks
+            if ($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"})[]# != 0) $$->%listbox_network->$insertitem(%network)
+        }
 
         # Clearing listbox_nick
         $$->%listbox_nick->$clear
@@ -676,8 +900,8 @@ alias(HighlightManagementScript::Startup)
             
             # Populating nick listbox
             %dialog->%listbox_nick->$clear
-            %sortedNicks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}))
-            foreach(%nick,%sortedNicks) %dialog->%listbox_nick->$insertitem(%nick)
+            %sorted_nicks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Nicks"}))
+            foreach(%nick,%sorted_nicks) %dialog->%listbox_nick->$insertitem(%nick)
         }
     }
 
@@ -732,6 +956,225 @@ alias(HighlightManagementScript::Startup)
     # Saving dialog object ID
     %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteNickFromHighlightBlacklist"} = %dialog
 
+    # Add Username To Blacklist dialog
+    %dialog = $new(dialog,,"HighlightManagementScript_AddUsernameToHighlightBlacklist")
+    %dialog->$setWindowTitle("Add Username To Highlight Blacklist")
+
+    %vbox = $new(vbox,%dialog,"VBox")
+    %layout = $new(layout,%dialog)
+    %layout->$addRowSpacing(0,30)
+    %layout->$addWidget(%vbox,0,0)
+
+    %label_network = $new(label,%vbox)
+    %label_network->$setText("Network:")
+
+    %lineedit_network = $new(lineedit,%vbox,"Network")
+    %dialog->%lineedit_network = %lineedit_network
+
+    %label_username = $new(label,%vbox)
+    %label_username->$setText("Username:")
+    %lineedit_username = $new(lineedit,%vbox,"Username")
+    %dialog->%lineedit_username = %lineedit_username
+
+    %label_notes = $new(label,%vbox)
+    %label_notes->$setText("Notes (optional):")
+    %multilineedit_notes = $new(multilineedit,%vbox,"Notes")
+    %dialog->%multilineedit_notes = %multilineedit_notes
+
+    %hbox = $new(hbox,%dialog)
+    %layout->$addWidget(%hbox,1,0)
+
+    %button_OK = $new(button, %hbox)
+    %button_OK->$setText("OK")
+
+    %button_Cancel = $new(button, %hbox)
+    %button_Cancel->$setText("Cancel")
+
+    # Event overrides
+    privateimpl(%dialog,"showevent")
+    {
+        # Clearing widgets and focussing
+        $$->%lineedit_network->$clear
+        $$->%lineedit_username->$clear
+        $$->%multilineedit_notes->$clear
+        $$->%lineedit_network->$setFocus
+    }
+
+    privateimpl(%dialog,"OK")
+    {
+        # Obtaining information
+        %network = $$->%lineedit_network->$Text
+        %username = $$->%lineedit_username->$Text
+        %notes = $$->%multilineedit_notes->$Text
+
+        # Adding username to blacklist
+        %return = $HighlightManagementScript("addusername", %network, %username, %notes)
+
+        # Dealing with results
+        switch (%return)
+        {
+            case(0)
+            {
+                # Success - reporting based on presence of notes
+                if (%notes != "")
+                {
+                    dialog.message("Add Username To Highlight Blacklist", "Added "%username" ("%notes") to username blacklist on "%network".","Information") { }
+                }
+                else
+                {
+                    dialog.message("Add Username To Highlight Blacklist", "Added "%username" to username blacklist on "%network".","Information") { }
+                }
+                $$->$hide
+            }
+
+            case(1)
+            {
+                # Network wasn't specified
+                dialog.message("Add Username To Highlight Blacklist", "Please specify a network to blacklist on.","Warning") { }
+            }
+
+            case(2)
+            {
+                # Username wasn't specified
+                dialog.message("Add Username To Highlight Blacklist", "Please specify a username to blacklist on "%network".","Warning") { }
+            }
+
+            case(3)
+            {
+                # Username already blacklisted on network
+                dialog.message("Add Username To Highlight Blacklist", %username" is already blacklisted on "%network".","Warning") { }
+            }
+        }
+    }
+
+    privateimpl(%dialog,"Cancel")
+    {
+        # Hiding dialog
+        $$->$hide
+    }
+
+    objects.connect %button_OK clicked %dialog OK
+    objects.connect %button_Cancel clicked %dialog Cancel
+
+    # Saving dialog object ID
+    %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_AddUsernameToHighlightBlacklist"} = %dialog
+
+    # Delete Username From Blacklist dialog
+    %dialog = $new(dialog,,"HighlightManagementScript_DeleteUsernameFromHighlightBlacklist")
+    %dialog->$setWindowTitle("Delete Username From Highlight Blacklist")
+
+    %vbox = $new(vbox,%dialog,"VBox")
+    %layout = $new(layout,%dialog)
+    %layout->$addRowSpacing(0,30)
+    %layout->$addWidget(%vbox,0,0)
+
+    %label_network = $new(label,%vbox)
+    %label_network->$setText("Network:")
+    %listbox_network = $new(listbox,%vbox,"Network")
+    %dialog->%listbox_network = %listbox_network
+
+    %label_username = $new(label,%vbox)
+    %label_username->$setText("Username:")
+    %listbox_username = $new(listbox,%vbox,"Username")
+    %dialog->%listbox_username = %listbox_username
+
+    %hbox = $new(hbox,%dialog)
+    %layout->$addWidget(%hbox,1,0)
+
+    %button_OK = $new(button, %hbox)
+    %button_OK->$setText("OK")
+
+    %button_Cancel = $new(button, %hbox)
+    %button_Cancel->$setText("Cancel")
+
+    # Event overrides
+    privateimpl(%dialog,"showevent")
+    {
+        # Populating listbox_network
+        $$->%listbox_network->$clear
+        %sorted_networks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}))
+        foreach(%network,%sorted_networks)
+        {
+            # Only add the network when there are blacklisted usernames
+            if ($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"})[]# != 0) $$->%listbox_network->$insertitem(%network)
+        }
+
+        # Clearing listbox_username
+        $$->%listbox_username->$clear
+
+        # Focussing listbox_network
+        $$->%listbox_network->$setFocus
+    }
+
+    privateimpl(%listbox_network,"currentItemChangedEvent")
+    {
+        # A network has been selected - obtaining network
+        %network = $$->$currentText
+
+        # Making sure network is available (the first event firing is before this)
+        if (%network != "")
+        {
+            # Obtaining dialog object ID
+            %dialog = %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteUsernameFromHighlightBlacklist"}
+
+            # Populating username listbox
+            %dialog->%listbox_username->$clear
+            %sorted_usernames = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedNicks"}{%network}{"Usernames"}))
+            foreach(%username,%sorted_usernames) %dialog->%listbox_username->$insertitem(%username)
+        }
+    }
+
+    privateimpl(%dialog,"OK")
+    {
+        # Obtaining information
+        %network = $$->%listbox_network->$currentText
+        %username = $$->%listbox_username->$currentText
+
+        # Deleting username from blacklist
+        %return = $HighlightManagementScript("deleteusername", %network, %username, %notes)
+
+        # Dealing with results
+        switch (%return)
+        {
+            case(0)
+            {
+                # Success
+                dialog.message("Delete Username From Highlight Blacklist", "Deleted "%username" from blacklist on "%network".","Information") { }
+                $$->$hide
+            }
+
+            case(1)
+            {
+                # Network wasn't specified
+                dialog.message("Delete Username From Highlight Blacklist", "Please specify a network to remove a blacklisted username from.","Warning") { }
+            }
+
+            case(2)
+            {
+                # Username wasn't specified
+                dialog.message("Delete Username From Highlight Blacklist", "Please specify a username to remove from the blacklist on "%network".","Warning") { }
+            }
+
+            case(3)
+            {
+                # Username isn't blacklisted on network
+                dialog.message("Delete Username From Highlight Blacklist", %username" is not blacklisted on "%network".","Warning") { }
+            }
+        }
+    }
+
+    privateimpl(%dialog,"Cancel")
+    {
+        # Hiding dialog
+        $$->$hide
+    }
+
+    objects.connect %button_OK clicked %dialog OK
+    objects.connect %button_Cancel clicked %dialog Cancel
+
+    # Saving dialog object ID
+    %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteUsernameFromHighlightBlacklist"} = %dialog
+
     # Add Channel To Blacklist dialog
     %dialog = $new(dialog,,"HighlightManagementScript_AddChannelToHighlightBlacklist")
     %dialog->$setWindowTitle("Add Channel To Highlight Blacklist")
@@ -746,7 +1189,7 @@ alias(HighlightManagementScript::Startup)
     
     %lineedit_network = $new(lineedit,%vbox,"Network")
     %dialog->%lineedit_network = %lineedit_network
-    
+
     %label_channel = $new(label,%vbox)
     %label_channel->$setText("Channel:")
     %lineedit_channel = $new(lineedit,%vbox,"Channel")
@@ -843,12 +1286,12 @@ alias(HighlightManagementScript::Startup)
     %layout = $new(layout,%dialog)
     %layout->$addRowSpacing(0,30)
     %layout->$addWidget(%vbox,0,0)
-    
+
     %label_network = $new(label,%vbox)
     %label_network->$setText("Network:")
     %listbox_network = $new(listbox,%vbox,"Network")
     %dialog->%listbox_network = %listbox_network
-    
+
     %label_channel = $new(label,%vbox)
     %label_channel->$setText("Channel:")
     %listbox_channel = $new(listbox,%vbox,"Channel")
@@ -868,8 +1311,8 @@ alias(HighlightManagementScript::Startup)
     {
         # Populating listbox_network 
         $$->%listbox_network->$clear
-        %sortedNetworks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}))
-        foreach(%network,%sortedNetworks) $$->%listbox_network->$insertitem(%network)
+        %sorted_networks = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}))
+        foreach(%network,%sorted_networks) $$->%listbox_network->$insertitem(%network)
 
         # Clearing listbox_channel
         $$->%listbox_channel->$clear
@@ -891,8 +1334,8 @@ alias(HighlightManagementScript::Startup)
             
             # Populating channel listbox
             %dialog->%listbox_channel->$clear
-            %sortedChannels = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}))
-            foreach(%channel,%sortedChannels) %dialog->%listbox_channel->$insertitem(%channel)
+            %sorted_channels = $sort($keys(%HighlightManagementScript_Settings{"BlacklistedChans"}{%network}))
+            foreach(%channel,%sorted_channels) %dialog->%listbox_channel->$insertitem(%channel)
         }
     }
 
@@ -947,6 +1390,117 @@ alias(HighlightManagementScript::Startup)
     # Saving dialog object ID
     %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteChannelFromHighlightBlacklist"} = %dialog
 
+    # Configure Highlight Log Window dialog
+    %dialog = $new(dialog,,"HighlightManagementScript_HighlightLogWindowConfiguration")
+    %dialog->$setWindowTitle("Configure Highlight Log Window")
+
+    %vbox = $new(vbox,%dialog,"VBox")
+    %layout = $new(layout,%dialog)
+    %layout->$addRowSpacing(0,30)
+    %layout->$addWidget(%vbox,0,0)
+
+    %label_normal_timestamp_format = $new(label,%vbox)
+    %label_normal_timestamp_format->$setText("Timestamp format:")
+
+    %lineedit_timestamp_format = $new(lineedit,%vbox,"TimestampFormat")
+    %dialog->%lineedit_timestamp_format = %lineedit_timestamp_format
+
+    %label_timestamp_format_help = $new(label,%vbox,"TimestampFormatHelp")
+    %label_timestamp_format_help->$setText("\nThe timestamp format string is passed through KVIrc's \$date function (see http://www.kvirc.net/doc/fnc_date.html for full documentation) - the following returns date and time in the normal English form (text is copyable):\n\n4rd of March 1970 01:02AM -> '04/03/70 01:02': d/m/y H:M:S\n")
+    %label_timestamp_format_help->$setAlignment("Justify")
+
+    %label_normal_highlight_format = $new(label,%vbox)
+    %label_normal_highlight_format->$setText("Log line format for normal highlight:")
+
+    %lineedit_normal_highlight_format = $new(lineedit,%vbox,"NormalHighlightFormat")
+    %dialog->%lineedit_normal_highlight_format = %lineedit_normal_highlight_format
+
+    %label_pm_highlight_format = $new(label,%vbox)
+    %label_pm_highlight_format->$setText("Log line format for PM highlight:")
+
+    %lineedit_pm_highlight_format = $new(lineedit,%vbox,"PMHighlightFormat")
+    %dialog->%lineedit_pm_highlight_format = %lineedit_pm_highlight_format
+
+    %label_highlight_format_help = $new(label,%vbox,"HighlightFormatHelp")
+    %label_highlight_format_help->$setText("\nThe following substitution variables are available:\n\nTimestamp: \%t\nNetwork name: \%N\nChannel: \%c\nNick: \%n\nMessage: \%m\n\nSee the default normal and PM highlight examples (text is copyable):\n\n[\%t] On \%N, message on \%c from \%n: \%m\n\n[\%t] On \%N, PM from \%n: \%m\n")
+
+    %checkbox_log_to_file = $new(checkbox,%vbox,"LogToFile")
+    %checkbox_log_to_file->$setText("Log highlights to file (output in the user-configured KVIrc log directory)")
+    %dialog->%checkbox_log_to_file = %checkbox_log_to_file
+
+    %hbox = $new(hbox,%dialog)
+    %layout->$addWidget(%hbox,1,0)
+
+    %button_OK = $new(button, %hbox)
+    %button_OK->$setText("OK")
+
+    %button_Cancel = $new(button, %hbox)
+    %button_Cancel->$setText("Cancel")
+
+    # Event overrides
+    privateimpl(%dialog,"showevent")
+    {
+        # Loading settings
+        $$->%lineedit_timestamp_format->$setText(%HighlightManagementScript_Settings{"HighlightLogTimestampFormat"})
+        $$->%lineedit_normal_highlight_format->$setText(%HighlightManagementScript_Settings{"HighlightLogNormalHighlightFormat"})
+        $$->%lineedit_pm_highlight_format->$setText(%HighlightManagementScript_Settings{"HighlightLogPMHighlightFormat"})
+        $$->%checkbox_log_to_file->$setChecked(%HighlightManagementScript_Settings{"HighlightLogLogToFile"})
+
+        # Focussing lineedit_timestamp_format
+        $$->%lineedit_timestamp_format->$setFocus
+    }
+
+    privateimpl(%dialog,"OK")
+    {
+        # Obtaining information
+        %timestamp_format = $$->%lineedit_timestamp_format->$text
+        %normal_highlight_format = $$->%lineedit_normal_highlight_format->$text
+        %pm_highlight_format = $$->%lineedit_pm_highlight_format->$text
+        %checkbox_log_to_file = $$->%checkbox_log_to_file->$isChecked
+
+        # Validating
+        if (%timestamp_format == "")
+        {
+            dialog.message("Configure Highlight Management Script", "Please specify a timestamp format.","Warning") { }
+            $$->%lineedit_timestamp_format->$setFocus
+            return
+        }
+        if (%normal_highlight_format == "")
+        {
+            dialog.message("Configure Highlight Management Script", "Please specify a normal highlight log line format.","Warning") { }
+            $$->%lineedit_normal_highlight_format->$setFocus
+            return
+        }
+        if (%pm_highlight_format == "")
+        {
+            dialog.message("Configure Highlight Management Script", "Please specify a PM highlight log line format.","Warning") { }
+            $$->%lineedit_pm_highlight_format->$setFocus
+            return
+        }
+
+        # Saving settings
+        %HighlightManagementScript_Settings{"HighlightLogTimestampFormat"} = %timestamp_format
+        %HighlightManagementScript_Settings{"HighlightLogNormalHighlightFormat"} = %normal_highlight_format
+        %HighlightManagementScript_Settings{"HighlightLogPMHighlightFormat"} = %pm_highlight_format
+        %HighlightManagementScript_Settings{"HighlightLogLogToFile"} = %checkbox_log_to_file
+        HighlightManagementScript::Save
+
+        # Hiding dialog
+        $$->$hide
+    }
+
+    privateimpl(%dialog,"Cancel")
+    {
+        # Hiding dialog
+        $$->$hide
+    }
+
+    objects.connect %button_OK clicked %dialog OK
+    objects.connect %button_Cancel clicked %dialog Cancel
+
+    # Saving dialog object ID
+    %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_HighlightLogWindowConfiguration"} = %dialog
+
     # Integrating into main toolbar
     # Creating script popup
     if ($popup.exists("HighlightManagementScript_Main")) popup.destroy "HighlightManagementScript_Main"
@@ -966,6 +1520,18 @@ alias(HighlightManagementScript::Startup)
         %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteNickFromHighlightBlacklist"}->$show
     }
     popup.addSeparator "HighlightManagementScript_Main"
+    popup.addItem("HighlightManagementScript_Main", "List blacklisted usernames") HighlightManagementScript "listusernames"
+    popup.addItem("HighlightManagementScript_Main", "Add username to blacklist on network...")
+    {
+        # Showing dialog
+        %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_AddUsernameToHighlightBlacklist"}->$show
+    }
+    popup.addItem("HighlightManagementScript_Main", "Delete username from blacklist on network...")
+    {
+        # Showing dialog
+        %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteUsernameFromHighlightBlacklist"}->$show
+    }
+    popup.addSeparator "HighlightManagementScript_Main"
     popup.addItem("HighlightManagementScript_Main", "List blacklisted channels") HighlightManagementScript "listchans"
     popup.addItem("HighlightManagementScript_Main", "Add channel to blacklist on network...")
     {
@@ -976,6 +1542,12 @@ alias(HighlightManagementScript::Startup)
     {
         # Showing dialog
         %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_DeleteChannelFromHighlightBlacklist"}->$show
+    }
+    popup.addSeparator "HighlightManagementScript_Main"
+    popup.addItem("HighlightManagementScript_Main", "Configure Highlight Log window...")
+    {
+        # Showing dialog
+        %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_HighlightLogWindowConfiguration"}->$show
     }
 
     # Making sure the main 'Scripts' menu command exists
@@ -991,10 +1563,10 @@ alias(HighlightManagementScript::Startup)
     # Integrating into channel popup
     if ($popup.exists("HighlightManagementScript_Channel")) popup.destroy "HighlightManagementScript_Channel"
     popup.create "HighlightManagementScript_Channel"
-    popup.addItem("HighlightManagementScript_Channel", "Add \$target to blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedChans\"}{\$context.networkName}{\$target} == \"\") 
+    popup.addItem("HighlightManagementScript_Channel", "Add nick \$target to blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedChans\"}{\$context.networkName}{\$target} == \"\")
     {
         # Obtaining notes
-        dialog.textinput -i=$icon(serverinfo) ("Add "$target" To Highlight Blacklist", "Notes associated with blacklisting "$target" (optional):", "Add", "escape=Cancel")
+        dialog.textinput -i=$icon(serverinfo) ("Add Nick $target To Highlight Blacklist", "Notes associated with blacklisting nick $target (optional):", "Add", "escape=Cancel")
         {
             # Debug code
             #echo "Dialog return value: "$0
@@ -1024,10 +1596,10 @@ alias(HighlightManagementScript::Startup)
     # Creating script popup
     if ($popup.exists("HighlightManagementScript_Nicklist")) popup.destroy "HighlightManagementScript_Nicklist"
     popup.create "HighlightManagementScript_Nicklist"
-    popup.addItem("HighlightManagementScript_Nicklist", "Add \$0 to blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\$0} == \"\") 
+    popup.addItem("HighlightManagementScript_Nicklist", "Add nick \$0 to blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\"Nicks\"}{\$0} == \"\")
     {
         # Obtaining notes - passing nick as a magic parameter so that it is accessible to the dialog code
-        dialog.textinput -i=$icon(serverinfo) ("Add "$0" To Highlight Blacklist", "Notes associated with blacklisting "$0" (optional):", "Add", "escape=Cancel",,$0)
+        dialog.textinput -i=$icon(serverinfo) ("Add Nick "$0" To Highlight Blacklist", "Notes associated with blacklisting "$0" (optional):", "Add", "escape=Cancel",,$0)
         {
             # Debug code
             #echo "Dialog return value: "$0
@@ -1042,16 +1614,52 @@ alias(HighlightManagementScript::Startup)
             HighlightManagementScript "addnick" $context.networkName $2 %notes
         }
     }
-    popup.addItem("HighlightManagementScript_Nicklist", "Delete \$0 from blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\$0} != \"\") 
+    popup.addItem("HighlightManagementScript_Nicklist", "Delete nick \$0 from blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\"Nicks\"}{\$0} != \"\")
     {
         # Deleting nick from blacklist
         HighlightManagementScript "deletenick" $context.networkName $0
+    }
+    popup.addItem("HighlightManagementScript_Nicklist", "Add username \$username\(\$0\) to blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\"Usernames\"}{\$username\(\$0\)} == \"\")
+    {
+        # Obtaining notes - passing username as a magic parameter so that it is accessible to the dialog code
+        dialog.textinput -i=$icon(serverinfo) ("Add Username "$username($0)" To Highlight Blacklist", "Notes associated with blacklisting "$username($0)" (optional):", "Add", "escape=Cancel",,$username($0))
+        {
+            # Debug code
+            #echo "Dialog return value: "$0
+
+            # Exiting if user cancelled
+            if ($0 == 1) return
+
+            # Setting notes
+            %notes = $1
+
+            # Blacklisting username
+            HighlightManagementScript "addusername" $context.networkName $2 %notes
+        }
+    }
+    popup.addItem("HighlightManagementScript_Nicklist", "Delete username \$username\(\$0\) from blacklist on \$context.networkName",,, \%HighlightManagementScript_Settings{\"BlacklistedNicks\"}{\$context.networkName}{\"Usernames\"}{\$username\(\$0\)} != \"\")
+    {
+        # Deleting username from blacklist
+        HighlightManagementScript "deleteusername" $context.networkName $username($0)
     }
 
     # Adding Highlight Management Script menu to nicklist popup (ensuring that it doesn't exist already)
     popup.delitem -q "channel" "HighlightManagementScript_Nicklist"
     popup.addSeparator "channel" "HighlightManagementScript_Nicklist_Separator" \%HighlightManagementScript_Settings{\"Status\"} == \"On\"
     popup.addExtPopup "channel" "HighlightManagementScript_Nicklist" "Highlight Management Script" "" "HighlightManagementScript_Nicklist" \%HighlightManagementScript_Settings{\"Status\"} == \"On\"
+
+    # Creating the Highlight Log window
+    # Note that show isn't actually needed for windows - they are created immediately?
+    %log_window = $new(window,,"Highlight Log")
+    %log_widget = $new(multilineedit,%log_window,"Log")
+    %log_widget->$setReadOnly($true)
+
+    # Embedding log into window
+    %log_window->$setCentralWidget(%log_widget)
+    %log_window->%log_widget = %log_widget
+
+    # Saving window object ID
+    %HighlightManagementScript_Settings{"GUI"}{"HighlightManagementScript_HighlightLog"} = %log_window
 }
 
 # Uninstaller alias
@@ -1094,6 +1702,14 @@ alias(HighlightManagementScript::uninstall::uninstall)
 # Item: {"Status"}. Data: Script status - 'On'/'Off'.
 # Item: {"BlacklistedChans"}. Data: Hash of all blacklisted channels.
 # Item: {"BlacklistedChans"}{<network>}{<channel>}. Data: Notes, if different from the channel itself (KVIrc doesn't allow empty items). Overall presence of item indicates channel is blacklisted.
-# Item: {"BlacklistedNicks"}. Data: Hash of all blacklisted nicks.
-# Item: {"BlacklistedNicks"}{<network>}{<nick>}. Data: Notes, if different from the nick itself (KVIrc doesn't allow empty items). Overall presence of item indicates nick is blacklisted.
+# Item: {"BlacklistedNicks"}. Data: Hash of all blacklisted users in various identification forms.
+# Old: Item: {"BlacklistedNicks"}{<network>}{<nick>}. Data: Notes, if different from the nick itself (KVIrc doesn't allow empty items). Overall presence of item indicates nick is blacklisted.
+# Item: {"BlacklistedNicks"}{<network>}{"Nicks"}. Data: Hash of all blacklisted nicks.
+# Item: {"BlacklistedNicks"}{<network>}{"Nicks"}{<nick>}. Data: Notes, if different from the nick itself (KVIrc doesn't allow empty items). Overall presence of item indicates nick is blacklisted.
+# Item: {"BlacklistedNicks"}{<network>}{"Usernames"}. Data: Hash of all blacklisted nicks.
+# Item: {"BlacklistedNicks"}{<network>}{"Usernames"}{<username>}. Data: Notes, if different from the username itself (KVIrc doesn't allow empty items). Overall presence of item indicates username is blacklisted.
+# Item: {"HighlightLogTimestampFormat"}. Data: Format string for the Highlight Log timestamp.
+# Item: {"HighlightLogNormalHighlightFormat"}. Data: Format string for the Highlight Log normal highlight.
+# Item: {"HighlightLogPMHighlightFormat"}. Data: Format string for the Highlight Log PM highlight.
+# Item: {"HighlightLogLogToFile"}. Data: $true/$false. Indicates whether highlights are logged to file or not.
 # Item: {"GUI"}. Data: GUI objects.
